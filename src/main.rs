@@ -1,22 +1,101 @@
-use actix_web::{get, App, HttpResponse, HttpServer, Responder};
+use actix_web::{
+    error, get,
+    http::{header::ContentType, StatusCode},
+    web, App, HttpResponse, HttpServer, Responder, Result,
+};
+use derive_more::{Display, Error};
 use lazy_static::lazy_static;
 use rand::seq::SliceRandom;
 use rand::thread_rng;
+use serde::Serialize;
 use std::collections::HashMap;
 
-const NUMBER_OF_QUESTIONS: usize = 5;
+#[derive(Debug, Display, Error)]
+enum AcerError {
+    #[display(fmt = "internal error")]
+    InternalError,
+    #[display(fmt = "bad request")]
+    BadClientData,
+    #[display(fmt = "timeout")]
+    Timeout,
+}
+
+impl error::ResponseError for AcerError {
+    fn error_response(&self) -> HttpResponse {
+        HttpResponse::build(self.status_code())
+            .insert_header(ContentType::html())
+            .body(self.to_string())
+    }
+
+    fn status_code(&self) -> StatusCode {
+        match *self {
+            AcerError::InternalError => StatusCode::INTERNAL_SERVER_ERROR,
+            AcerError::BadClientData => StatusCode::BAD_REQUEST,
+            AcerError::Timeout => StatusCode::GATEWAY_TIMEOUT,
+        }
+    }
+}
+
+#[derive(Serialize, Clone)]
+struct QuestionAnswer {
+    question: String,
+    answer: String,
+}
 
 lazy_static! {
-    static ref QUESTION_KV_DATABASE: HashMap<u32, (&'static str, &'static str)> = {
-        let mut m = HashMap::new();
-        m.insert(0, ("What's my name?", "Acer\n"));
-        m.insert(1, ("What's Luiz0s name?", "Luiz\n"));
-        m.insert(2, ("What's Jorge's name?", "GOD\n"));
-        m.insert(3, ("Are you sentient?", "On Ma I toN\n"));
-        m.insert(4, ("Where do you live?", "Stalker!\n"));
-        m.insert(5, ("What's the purpose of life?", "FU\n"));
-        m.insert(6, ("How to make a good question?", "That's not the way!\n"));
-        m
+    static ref QUESTION_KV_DATABASE: HashMap<u32, QuestionAnswer> = {
+        let db = HashMap::from([
+            (
+                0,
+                QuestionAnswer {
+                    question: "What's my name?".to_string(),
+                    answer: "Acer".to_string(),
+                },
+            ),
+            (
+                1,
+                QuestionAnswer {
+                    question: "What's Luiz's name?".to_string(),
+                    answer: "Luiz".to_string(),
+                },
+            ),
+            (
+                2,
+                QuestionAnswer {
+                    question: "What's Jorge's name?".to_string(),
+                    answer: "GOD".to_string(),
+                },
+            ),
+            (
+                3,
+                QuestionAnswer {
+                    question: "Are you sentient?".to_string(),
+                    answer: "On Ma I toN".to_string(),
+                },
+            ),
+            (
+                4,
+                QuestionAnswer {
+                    question: "Where do you live?".to_string(),
+                    answer: "Stalker!".to_string(),
+                },
+            ),
+            (
+                5,
+                QuestionAnswer {
+                    question: "What's the purpose of life?".to_string(),
+                    answer: "FU".to_string(),
+                },
+            ),
+            (
+                6,
+                QuestionAnswer {
+                    question: "How to make a good question?".to_string(),
+                    answer: "That's not the way!".to_string(),
+                },
+            ),
+        ]);
+        db
     };
 }
 
@@ -25,36 +104,39 @@ async fn hello_acer() -> impl Responder {
     HttpResponse::Ok().body("Hello Acer!")
 }
 
-#[get("/get_random_answers")]
-async fn get_random_answers() -> impl Responder {
+#[get("/random_questions/{number_of_questions}")]
+async fn random_questions(
+    number_of_questions: web::Path<usize>,
+) -> Result<impl Responder, AcerError> {
     let mut rng = thread_rng();
     let questions_database_size = QUESTION_KV_DATABASE.keys().len();
+    let number_of_questions = *number_of_questions;
+    if number_of_questions > questions_database_size {
+        return Err(AcerError::BadClientData);
+    }
+
     let mut array_of_database_keys: Vec<usize> = (1..questions_database_size).collect();
     let array_of_database_keys_slice = &mut array_of_database_keys[..];
     array_of_database_keys_slice.shuffle(&mut rng);
     let answers_index: Vec<u32> = array_of_database_keys
         .into_iter()
-        .take(NUMBER_OF_QUESTIONS)
+        .take(number_of_questions)
         .map(|i| i as u32)
         .collect();
-    let answers: String = answers_index
+    let question_answers: Vec<QuestionAnswer> = answers_index
         .clone()
         .into_iter()
         .map(|i| {
             let question_answer = QUESTION_KV_DATABASE.get(&(i as u32)).unwrap();
-            let question = question_answer.0;
-            let answer = question_answer.1;
-            let v = vec![question, answer];
-            let f: String = v.join(" - ");
-            f
+            question_answer.clone()
         })
-        .collect::<String>();
-    HttpResponse::Ok().body(answers)
+        .collect();
+    Ok(web::Json(question_answers))
 }
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    HttpServer::new(|| App::new().service(hello_acer).service(get_random_answers))
+    HttpServer::new(|| App::new().service(hello_acer).service(random_questions))
         .bind(("127.0.0.1", 8000))?
         .run()
         .await
