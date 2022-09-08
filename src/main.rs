@@ -1,7 +1,14 @@
+#[macro_use]
+extern crate diesel;
+extern crate core;
+
+use diesel::prelude::*;
+use diesel::r2d2::{self, ConnectionManager};
+
 use actix_web::{
     error, get,
     http::{header::ContentType, StatusCode},
-    web, App, HttpResponse, HttpServer, Responder, Result,
+    middleware, post, web, App, Error as err, HttpResponse, HttpServer, Responder, Result,
 };
 use derive_more::{Display, Error};
 use lazy_static::lazy_static;
@@ -10,13 +17,17 @@ use rand::thread_rng;
 use serde::Serialize;
 use std::collections::HashMap;
 
+mod actions;
+mod models;
+mod schema;
+
 #[derive(Debug, Display, Error)]
 enum AcerError {
-    #[display(fmt = "internal error")]
+    #[display(fmt = "Internal Error")]
     InternalError,
-    #[display(fmt = "bad request")]
+    #[display(fmt = "Bad Request")]
     BadClientData,
-    #[display(fmt = "timeout")]
+    #[display(fmt = "Timeout")]
     Timeout,
 }
 
@@ -134,10 +145,42 @@ async fn random_questions(
     Ok(web::Json(question_answers))
 }
 
+type DbPool = r2d2::Pool<ConnectionManager<SqliteConnection>>;
+
+#[post("/add_question")]
+async fn add_question(
+    pool: web::Data<DbPool>,
+    form: web::Json<models::NewRandomQuestion>,
+) -> Result<impl Responder, err> {
+    let question = web::block(move || {
+        let mut conn = pool.get()?;
+        actions::insert_new_random_question(&form.question, &form.answer, &mut conn)
+    })
+    .await?
+    .map_err(error::ErrorInternalServerError)?;
+    Ok(web::Json(question))
+}
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    HttpServer::new(|| App::new().service(hello_acer).service(random_questions))
-        .bind(("127.0.0.1", 8000))?
-        .run()
-        .await
+    dotenv::dotenv().ok();
+    env_logger::init_from_env(env_logger::Env::new().default_filter_or("info"));
+
+    let conn_spec = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+    let manager = ConnectionManager::<SqliteConnection>::new(conn_spec);
+    let pool = r2d2::Pool::builder()
+        .build(manager)
+        .expect("Failed to create pool.");
+
+    HttpServer::new(move || {
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .wrap(middleware::Logger::default())
+            .service(hello_acer)
+            .service(random_questions)
+            .service(add_question)
+    })
+    .bind(("127.0.0.1", 8000))?
+    .run()
+    .await
 }

@@ -1,0 +1,5 @@
+CREATE TABLE random_questions (
+    id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    question VARCHAR NOT NULL,
+    answer VARCHAR NOT NULL
+)
