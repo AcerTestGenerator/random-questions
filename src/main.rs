@@ -184,3 +184,42 @@ async fn main() -> std::io::Result<()> {
     .run()
     .await
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use actix_web::test;
+
+    #[actix_web::test]
+    async fn test_insert_new_question() {
+        std::env::set_var("RUST_LOG", "actix_web=debug");
+        env_logger::init();
+        dotenv::dotenv().ok();
+
+        let conn = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+        let manager = ConnectionManager::<SqliteConnection>::new(conn);
+        let pool = r2d2::Pool::builder()
+            .build(manager)
+            .expect("Failed to create connection pool!");
+
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(pool.clone()))
+                .wrap(middleware::Logger::default())
+                .service(add_question)
+        )
+            .await;
+
+        let req = test::TestRequest::post()
+            .uri("/add_question")
+            .set_json(&models::NewRandomQuestion {
+                question: "Who is god?".to_owned(),
+                answer: "REDOUANE".to_owned(),
+            })
+            .to_request();
+        // this will be fixed after the change to Option<i32> id
+        let reponse: models::NewRandomQuestion = test::call_and_read_body_json(&app, req).await;
+        assert_eq!(reponse.answer, "REDOUANE");
+    }
+}
+
