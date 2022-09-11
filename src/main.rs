@@ -5,6 +5,7 @@ extern crate core;
 use diesel::prelude::*;
 use diesel::r2d2::{self, ConnectionManager};
 
+use actix_cors::Cors;
 use actix_web::{
     error, get,
     http::{header::ContentType, StatusCode},
@@ -118,31 +119,46 @@ async fn hello_acer() -> impl Responder {
 #[get("/random_questions/{number_of_questions}")]
 async fn random_questions(
     number_of_questions: web::Path<usize>,
-) -> Result<impl Responder, AcerError> {
+    pool: web::Data<DbPool>,
+) -> Result<impl Responder, err> {
     let mut rng = thread_rng();
     let questions_database_size = QUESTION_KV_DATABASE.keys().len();
+
+    // HACK: so we can have 2 block points
+    let pool1 = pool.clone();
+
+    let database_size = web::block(move || {
+        let mut conn = pool1.get()?;
+        actions::get_questions_database_size(&mut *conn)
+    })
+    .await?
+    .map_err(error::ErrorInternalServerError)?;
+
     let number_of_questions = *number_of_questions;
-    if number_of_questions > questions_database_size {
-        return Err(AcerError::BadClientData);
+    if number_of_questions as i64 > database_size {
+        return Err(error::ErrorBadRequest(
+            "Not enough questions on the database!",
+        ));
     }
 
     let mut array_of_database_keys: Vec<usize> = (1..questions_database_size).collect();
     let array_of_database_keys_slice = &mut array_of_database_keys[..];
     array_of_database_keys_slice.shuffle(&mut rng);
-    let answers_index: Vec<u32> = array_of_database_keys
+
+    let answers_index: Vec<i32> = array_of_database_keys
         .into_iter()
         .take(number_of_questions)
-        .map(|i| i as u32)
+        .map(|i| i as i32)
         .collect();
-    let question_answers: Vec<QuestionAnswer> = answers_index
-        .clone()
-        .into_iter()
-        .map(|i| {
-            let question_answer = QUESTION_KV_DATABASE.get(&(i as u32)).unwrap();
-            question_answer.clone()
-        })
-        .collect();
-    Ok(web::Json(question_answers))
+
+    let res = web::block(move || {
+        let mut conn = pool.get()?;
+        actions::get_questions_randomly(&mut *conn, answers_index)
+    })
+    .await?
+    .map_err(error::ErrorInternalServerError)?;
+
+    Ok(web::Json(res))
 }
 
 type DbPool = r2d2::Pool<ConnectionManager<SqliteConnection>>;
@@ -173,8 +189,10 @@ async fn main() -> std::io::Result<()> {
         .expect("Failed to create pool.");
 
     HttpServer::new(move || {
+        let cors = Cors::permissive();
         App::new()
             .app_data(web::Data::new(pool.clone()))
+            .wrap(cors)
             .wrap(middleware::Logger::default())
             .service(hello_acer)
             .service(random_questions)
@@ -187,16 +205,33 @@ async fn main() -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use actix_web::{
+        body::to_bytes,
+        dev::{Service, ServiceResponse},
+        http::StatusCode,
+        test::{self},
+        web::Bytes,
+    };
+
     use super::*;
-    use actix_web::test;
+
+    trait BodyTest {
+        fn as_str(&self) -> &str;
+    }
+
+    impl BodyTest for Bytes {
+        fn as_str(&self) -> &str {
+            std::str::from_utf8(self).unwrap()
+        }
+    }
 
     #[actix_web::test]
-    async fn test_insert_new_question() {
+    async fn integration_test_endpoints() {
         std::env::set_var("RUST_LOG", "actix_web=debug");
         env_logger::init();
         dotenv::dotenv().ok();
 
-        let conn = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+        let conn = std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL");
         let manager = ConnectionManager::<SqliteConnection>::new(conn);
         let pool = r2d2::Pool::builder()
             .build(manager)
@@ -205,10 +240,10 @@ mod tests {
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(pool.clone()))
-                .wrap(middleware::Logger::default())
                 .service(add_question)
+                .service(random_questions),
         )
-            .await;
+        .await;
 
         let req = test::TestRequest::post()
             .uri("/add_question")
@@ -220,6 +255,14 @@ mod tests {
         // this will be fixed after the change to Option<i32> id
         let reponse: models::NewRandomQuestion = test::call_and_read_body_json(&app, req).await;
         assert_eq!(reponse.answer, "REDOUANE");
+
+        let req = test::TestRequest::get()
+            .uri(&format!("/random_questions/{}", 6))
+            .to_request();
+        let resp: ServiceResponse = app.call(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        let body = to_bytes(resp.into_body()).await.unwrap();
+        assert_eq!(body.as_str(), "Not enough questions on the database!");
     }
 }
-

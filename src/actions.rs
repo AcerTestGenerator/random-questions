@@ -20,3 +20,22 @@ pub fn insert_new_random_question(
         .execute(conn)?;
     Ok(new_random_question)
 }
+
+pub fn get_questions_database_size(conn: &mut SqliteConnection) -> Result<i64, DbError> {
+    use crate::schema::random_questions::dsl::*;
+    let cnt = random_questions.count().get_result(&mut *conn).unwrap();
+    Ok(cnt)
+}
+
+pub fn get_questions_randomly(
+    conn: &mut SqliteConnection,
+    ids: Vec<i32>,
+) -> Result<Vec<models::NewRandomQuestion>, DbError> {
+    use crate::schema::random_questions::dsl::*;
+    let res = random_questions
+        .select((question, answer))
+        .filter(id.eq_any(ids))
+        .load(conn)
+        .unwrap();
+    Ok(res)
+}
