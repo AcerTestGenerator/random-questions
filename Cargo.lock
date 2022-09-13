@@ -477,9 +477,9 @@ dependencies = [
  "diesel",
  "dotenv",
  "env_logger",
- "lazy_static",
  "rand",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
