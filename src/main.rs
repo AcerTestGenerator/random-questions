@@ -1,50 +1,66 @@
-#[macro_use]
-extern crate diesel;
 extern crate core;
+extern crate diesel;
 
 use diesel::prelude::*;
 use diesel::r2d2::{self, ConnectionManager};
 
 use actix_cors::Cors;
+use actix_web::error::BlockingError;
+use actix_web::ResponseError;
 use actix_web::{
-    error, get,
-    http::{header::ContentType, StatusCode},
-    middleware, post, web, App, Error as err, HttpResponse, HttpServer, Responder, Result,
+    error, get, http::StatusCode, middleware, post, web, App, Error as err, HttpResponse,
+    HttpServer, Responder, Result,
 };
-use derive_more::{Display, Error};
-use lazy_static::lazy_static;
 use rand::seq::SliceRandom;
 use rand::thread_rng;
 use serde::Serialize;
-use std::collections::HashMap;
+use std::fmt::{Display, Formatter, Result as FmtResult};
 
 mod actions;
 mod models;
 mod schema;
 
-#[derive(Debug, Display, Error)]
-enum AcerError {
-    #[display(fmt = "Internal Error")]
-    InternalError,
-    #[display(fmt = "Bad Request")]
-    BadClientData,
-    #[display(fmt = "Timeout")]
-    Timeout,
+#[derive(Debug, Serialize)]
+struct AcerError {
+    msg: String,
+    status: u16,
 }
 
-impl error::ResponseError for AcerError {
-    fn error_response(&self) -> HttpResponse {
-        HttpResponse::build(self.status_code())
-            .insert_header(ContentType::html())
-            .body(self.to_string())
+impl Display for AcerError {
+    fn fmt(&self, f: &mut Formatter) -> FmtResult {
+        let err_json = serde_json::to_string(self).unwrap();
+        write!(f, "{}", err_json)
     }
+}
 
-    fn status_code(&self) -> StatusCode {
-        match *self {
-            AcerError::InternalError => StatusCode::INTERNAL_SERVER_ERROR,
-            AcerError::BadClientData => StatusCode::BAD_REQUEST,
-            AcerError::Timeout => StatusCode::GATEWAY_TIMEOUT,
+impl From<BlockingError> for AcerError {
+    fn from(e: BlockingError) -> Self {
+        let code = e.status_code();
+        AcerError {
+            msg: e.to_string(),
+            status: u16::from(code),
         }
+    }
+}
+
+impl From<actix_web::Error> for AcerError {
+    fn from(e: actix_web::Error) -> Self {
+        let code = e.as_response_error().status_code();
+        let msg = e.as_response_error().to_string();
+        AcerError {
+            msg,
+            status: u16::from(code),
+        }
+    }
+}
+
+impl ResponseError for AcerError {
+    fn error_response(&self) -> HttpResponse {
+        let response = HttpResponse::build(StatusCode::from_u16(self.status).unwrap()).json(self);
+
+        dbg!(&response);
+
+        response
     }
 }
 
@@ -54,76 +70,12 @@ struct QuestionAnswer {
     answer: String,
 }
 
-lazy_static! {
-    static ref QUESTION_KV_DATABASE: HashMap<u32, QuestionAnswer> = {
-        let db = HashMap::from([
-            (
-                0,
-                QuestionAnswer {
-                    question: "What's my name?".to_string(),
-                    answer: "Acer".to_string(),
-                },
-            ),
-            (
-                1,
-                QuestionAnswer {
-                    question: "What's Luiz's name?".to_string(),
-                    answer: "Luiz".to_string(),
-                },
-            ),
-            (
-                2,
-                QuestionAnswer {
-                    question: "What's Jorge's name?".to_string(),
-                    answer: "GOD".to_string(),
-                },
-            ),
-            (
-                3,
-                QuestionAnswer {
-                    question: "Are you sentient?".to_string(),
-                    answer: "On Ma I toN".to_string(),
-                },
-            ),
-            (
-                4,
-                QuestionAnswer {
-                    question: "Where do you live?".to_string(),
-                    answer: "Stalker!".to_string(),
-                },
-            ),
-            (
-                5,
-                QuestionAnswer {
-                    question: "What's the purpose of life?".to_string(),
-                    answer: "FU".to_string(),
-                },
-            ),
-            (
-                6,
-                QuestionAnswer {
-                    question: "How to make a good question?".to_string(),
-                    answer: "That's not the way!".to_string(),
-                },
-            ),
-        ]);
-        db
-    };
-}
-
-#[get("/")]
-async fn hello_acer() -> impl Responder {
-    HttpResponse::Ok().body("Hello Acer!")
-}
-
 #[get("/random_questions/{number_of_questions}")]
 async fn random_questions(
     number_of_questions: web::Path<usize>,
     pool: web::Data<DbPool>,
-) -> Result<impl Responder, err> {
+) -> Result<impl Responder, AcerError> {
     let mut rng = thread_rng();
-    let questions_database_size = QUESTION_KV_DATABASE.keys().len();
-
     // HACK: so we can have 2 block points
     let pool1 = pool.clone();
 
@@ -136,12 +88,13 @@ async fn random_questions(
 
     let number_of_questions = *number_of_questions;
     if number_of_questions as i64 > database_size {
-        return Err(error::ErrorBadRequest(
-            "Not enough questions on the database!",
-        ));
+        return Err(AcerError {
+            msg: "Not enough questions on the database.".to_string(),
+            status: 400,
+        });
     }
 
-    let mut array_of_database_keys: Vec<usize> = (1..questions_database_size).collect();
+    let mut array_of_database_keys: Vec<i64> = (1..database_size).collect();
     let array_of_database_keys_slice = &mut array_of_database_keys[..];
     array_of_database_keys_slice.shuffle(&mut rng);
 
@@ -156,7 +109,10 @@ async fn random_questions(
         actions::get_questions_randomly(&mut *conn, answers_index)
     })
     .await?
-    .map_err(error::ErrorInternalServerError)?;
+    .map_err(|_e| AcerError {
+        msg: "Could not get the questions from the database!".to_string(),
+        status: 500,
+    })?;
 
     Ok(web::Json(res))
 }
@@ -194,7 +150,6 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(pool.clone()))
             .wrap(cors)
             .wrap(middleware::Logger::default())
-            .service(hello_acer)
             .service(random_questions)
             .service(add_question)
     })
