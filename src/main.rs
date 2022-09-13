@@ -122,8 +122,6 @@ async fn random_questions(
     pool: web::Data<DbPool>,
 ) -> Result<impl Responder, err> {
     let mut rng = thread_rng();
-    let questions_database_size = QUESTION_KV_DATABASE.keys().len();
-
     // HACK: so we can have 2 block points
     let pool1 = pool.clone();
 
@@ -141,7 +139,7 @@ async fn random_questions(
         ));
     }
 
-    let mut array_of_database_keys: Vec<usize> = (1..questions_database_size).collect();
+    let mut array_of_database_keys: Vec<i64> = (1..database_size).collect();
     let array_of_database_keys_slice = &mut array_of_database_keys[..];
     array_of_database_keys_slice.shuffle(&mut rng);
 
